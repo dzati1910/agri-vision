@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agri-vision-portfolio"
+version = "1.0.0"
+description = "High-Resolution Computer Vision Portfolio: SAHI Micro-Pest Detection & Sensor Fusion"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "IFSertãoPE Research Team" }
+]
+dependencies = [
+    "numpy>=1.26.0",
+    "opencv-python>=4.8.0",
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "ultralytics>=8.1.0",
+    "onnx>=1.15.0",
+    "onnxruntime>=1.17.0",
+    "scikit-learn>=1.4.0",
+    "pandas>=2.1.0",
+    "matplotlib>=3.8.0",
+    "streamlit>=1.30.0",
+    "pytest>=8.0.0"
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests"
+]
+pythonpath = [
+    "."
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
