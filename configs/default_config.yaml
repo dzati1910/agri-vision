@@ -1,0 +1,33 @@
+# Configuration for High-Resolution Agricultural Vision Pipeline
+# IFSertãoPE Viticulture Pest Monitoring
+
+project:
+  name: "agri-vision-portfolio"
+  target_pest: "Planococcus citri (Risso, 1813)"
+  crop: "Vitis vinifera (Videira)"
+  hardware:
+    camera: "Samsung Galaxy S25 (50MP Sensor)"
+    sensor: "SPAD-502 Optical Chlorophyll Meter"
+
+sahi:
+  slice_height: 640
+  slice_width: 640
+  overlap_height_ratio: 0.20
+  overlap_width_ratio: 0.20
+  include_full_image: true
+  batch_size: 4
+
+detection:
+  confidence_threshold: 0.25
+  nms_iou_threshold: 0.45
+  use_box_fusion: true
+
+classes:
+  0: "planococcus_citri_nymph"
+  1: "planococcus_citri_adult"
+  2: "planococcus_citri_ovisac"
+
+agronomic:
+  spad_healthy_baseline: 48.0
+  action_threshold_pests: 15
+  economic_injury_level_pests: 30
