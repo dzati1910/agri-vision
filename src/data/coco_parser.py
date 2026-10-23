@@ -89,8 +89,14 @@ class COCOParser:
         if not p.is_file():
             return {}
 
-        with open(p, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {}
+
+        if not isinstance(data, dict):
+            return {}
 
         category_map = {c["id"]: c["name"] for c in data.get("categories", [])}
         img_id_to_name = {img["id"]: img["file_name"] for img in data.get("images", [])}
