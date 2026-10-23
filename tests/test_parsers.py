@@ -86,3 +86,31 @@ def test_coco_parser_load_missing_file_returns_empty(tmp_path: Path):
     missing_file = tmp_path / "does_not_exist.json"
     result = COCOParser.load_coco_annotations(missing_file)
     assert result == {}
+
+
+def test_yolo_parser_missing_file_raises_filenotfound(tmp_path: Path):
+    missing_file = tmp_path / "non_existent_label.txt"
+    with pytest.raises(FileNotFoundError, match="YOLO annotation file not found"):
+        YOLOParser.load_annotation(missing_file, img_width=1000, img_height=1000)
+
+
+def test_yolo_parser_empty_file_returns_empty_list(tmp_path: Path):
+    empty_file = tmp_path / "healthy_leaf.txt"
+    empty_file.write_text("", encoding="utf-8")
+    result = YOLOParser.load_annotation(empty_file, img_width=1000, img_height=1000)
+    assert result == []
+
+
+def test_coco_parser_corrupted_json_returns_empty(tmp_path: Path):
+    corrupt_json = tmp_path / "broken.json"
+    corrupt_json.write_text("{ this is broken json :: ;;; }", encoding="utf-8")
+    result = COCOParser.load_coco_annotations(corrupt_json)
+    assert result == {}
+
+
+def test_coco_parser_non_dict_json_returns_empty(tmp_path: Path):
+    list_json = tmp_path / "list_root.json"
+    list_json.write_text("[]", encoding="utf-8")
+    result = COCOParser.load_coco_annotations(list_json)
+    assert result == {}
+

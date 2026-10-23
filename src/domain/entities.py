@@ -128,20 +128,26 @@ class BoundingBox:
             ymax=self.ymax + dy
         )
 
+    def intersection(self, other: BoundingBox) -> float:
+        """Calculates area of intersection with another box in pixels squared."""
+        ixmin = max(self.xmin, other.xmin)
+        iymin = max(self.ymin, other.ymin)
+        ixmax = min(self.xmax, other.xmax)
+        iymax = min(self.ymax, other.ymax)
+        w = max(0.0, ixmax - ixmin)
+        h = max(0.0, iymax - iymin)
+        return w * h
+
+    def intersects(self, other: BoundingBox) -> bool:
+        """Returns True if this box overlaps with another box by any positive area."""
+        return self.intersection(other) > 0.0
+
     def iou(self, other: BoundingBox) -> float:
         """
         Calculates Intersection-over-Union (Jaccard Index) with another box.
         Formula: IoU = Area(A ∩ B) / Area(A ∪ B)
         """
-        ixmin = max(self.xmin, other.xmin)
-        iymin = max(self.ymin, other.ymin)
-        ixmax = min(self.xmax, other.xmax)
-        iymax = min(self.ymax, other.ymax)
-
-        inter_w = max(0.0, ixmax - ixmin)
-        inter_h = max(0.0, iymax - iymin)
-        inter_area = inter_w * inter_h
-
+        inter_area = self.intersection(other)
         union_area = self.area + other.area - inter_area
         if union_area <= 0.0:
             return 0.0

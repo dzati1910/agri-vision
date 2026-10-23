@@ -15,13 +15,14 @@ env/
 venv/
 ENV/
 
-# Output images / checkpoints / runs
+# Output images / checkpoints / runs / generated datasets
 *.pt
 *.onnx
+*.onnx.data
 *.cache
 runs/
-output/models/
-data/tiled_dataset/
+/output/
+/data/
 
 # OS and IDE files
 .DS_Store

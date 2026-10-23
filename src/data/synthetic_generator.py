@@ -26,9 +26,10 @@ class SyntheticVinePestGenerator:
     """
 
     def __init__(self, seed: Optional[int] = 42) -> None:
-        if seed is not None:
-            random.seed(seed)
-            np.random.seed(seed)
+        # Instance-local RNGs — does NOT mutate global random/numpy state.
+        # This makes parallel dataset generation thread-safe and reproducible.
+        self._rng = np.random.default_rng(seed)
+        self._py_rng = random.Random(seed)
 
     def generate_sample(
         self,
@@ -58,19 +59,19 @@ class SyntheticVinePestGenerator:
             if treatment == "T0":  # Control: zero pests
                 n_pests = 0
             elif treatment == "T1":  # Light infestation
-                n_pests = random.randint(3, 8)
+                n_pests = self._py_rng.randint(3, 8)
             elif treatment == "T2":  # Moderate infestation
-                n_pests = random.randint(12, 25)
+                n_pests = self._py_rng.randint(12, 25)
             elif treatment == "T3":  # Severe infestation
-                n_pests = random.randint(35, 60)
+                n_pests = self._py_rng.randint(35, 60)
             else:
-                n_pests = random.randint(5, 20)
+                n_pests = self._py_rng.randint(5, 20)
         else:
             n_pests = pest_count
 
         # Physiological SPAD-502 reading simulation:
         # Healthy grapevine SPAD ~ 46.0 - 52.0. Severe infestation drops down to ~ 22.0 - 28.0
-        base_spad = 48.0 - (0.45 * n_pests) + random.uniform(-1.5, 1.5)
+        base_spad = 48.0 - (0.45 * n_pests) + self._py_rng.uniform(-1.5, 1.5)
         spad_value = max(18.0, min(55.0, round(base_spad, 1)))
 
         # 1. Base leaf canvas with chlorophyll gradient
@@ -79,14 +80,14 @@ class SyntheticVinePestGenerator:
 
         # Base leaf green (Vitis vinifera healthy parenchyma)
         # Deep forest/olive green with subtle noise
-        base_b = random.randint(25, 40)
-        base_g = random.randint(110, 140)
-        base_r = random.randint(35, 55)
+        base_b = self._py_rng.randint(25, 40)
+        base_g = self._py_rng.randint(110, 140)
+        base_r = self._py_rng.randint(35, 55)
 
         canvas[:, :] = [base_b, base_g, base_r]
 
         # Add Gaussian texture noise to simulate cellular cuticle
-        noise = np.random.normal(0, 7, (height, width, 3)).astype(np.int16)
+        noise = self._rng.normal(0, 7, (height, width, 3)).astype(np.int16)
         canvas = np.clip(canvas.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
         # 2. Draw procedural leaf veins (primary + secondary)
@@ -122,9 +123,9 @@ class SyntheticVinePestGenerator:
         # 3. Add chlorosis (yellowing) patches if pest count is high (sooty mold / sap drainage)
         if n_pests > 10:
             for _ in range(min(15, n_pests // 3)):
-                cx = random.randint(int(width * 0.2), int(width * 0.8))
-                cy = random.randint(int(height * 0.2), int(height * 0.8))
-                radius = random.randint(width // 40, width // 15)
+                cx = self._py_rng.randint(int(width * 0.2), int(width * 0.8))
+                cy = self._py_rng.randint(int(height * 0.2), int(height * 0.8))
+                radius = self._py_rng.randint(width // 40, width // 15)
                 # Chlorotic yellow overlay [B, G, R]
                 cv2.circle(canvas, (cx, cy), radius, (30, 180, 200), -1)
             # Blur chlorosis into the leaf tissue
@@ -135,57 +136,63 @@ class SyntheticVinePestGenerator:
 
         for p_idx in range(n_pests):
             # 80% chance to be near a vein, 20% random on lamina
-            if random.random() < 0.80 and vein_endpoints:
-                anchor = random.choice(vein_endpoints)
-                px = int(np.clip(anchor[0] + random.gauss(0, width * 0.05), width * 0.1, width * 0.9))
-                py = int(np.clip(anchor[1] + random.gauss(0, height * 0.05), height * 0.1, height * 0.9))
+            if self._py_rng.random() < 0.80 and vein_endpoints:
+                anchor = self._py_rng.choice(vein_endpoints)
+                px = int(np.clip(
+                    anchor[0] + self._rng.normal(0, width * 0.05),
+                    width * 0.1, width * 0.9
+                ))
+                py = int(np.clip(
+                    anchor[1] + self._rng.normal(0, height * 0.05),
+                    height * 0.1, height * 0.9
+                ))
             else:
-                px = random.randint(int(width * 0.15), int(width * 0.85))
-                py = random.randint(int(height * 0.15), int(height * 0.85))
+                px = self._py_rng.randint(int(width * 0.15), int(width * 0.85))
+                py = self._py_rng.randint(int(height * 0.15), int(height * 0.85))
 
             # Determine pest development stage
-            stage_roll = random.random()
+            stage_roll = self._py_rng.random()
             if stage_roll < 0.60:
                 stage = PestClass.NYMPH
                 cid = 0
                 cname = "planococcus_citri_nymph"
                 # Nymph size: 1.5 - 2.5 mm -> approx 18 - 32 pixels in high-res
-                w_px = random.randint(18, 30)
-                h_px = int(w_px * random.uniform(1.2, 1.5))
+                w_px = self._py_rng.randint(18, 30)
+                h_px = int(w_px * self._py_rng.uniform(1.2, 1.5))
             elif stage_roll < 0.85:
                 stage = PestClass.ADULT
                 cid = 1
                 cname = "planococcus_citri_adult"
                 # Adult female size: 3.0 - 4.5 mm -> approx 34 - 55 pixels
-                w_px = random.randint(32, 50)
-                h_px = int(w_px * random.uniform(1.3, 1.6))
+                w_px = self._py_rng.randint(32, 50)
+                h_px = int(w_px * self._py_rng.uniform(1.3, 1.6))
             else:
                 stage = PestClass.OVISAC
                 cid = 2
                 cname = "planococcus_citri_ovisac"
                 # Ovisac cottony mass
-                w_px = random.randint(45, 70)
-                h_px = int(w_px * random.uniform(1.1, 1.4))
+                w_px = self._py_rng.randint(45, 70)
+                h_px = int(w_px * self._py_rng.uniform(1.1, 1.4))
 
             # Draw pest morphology on canvas
             # Body: oval with chalky white/cream waxy coating
-            angle = random.uniform(0, 180)
+            angle = self._py_rng.uniform(0, 180)
             center = (px, py)
             axes = (w_px // 2, h_px // 2)
 
             # Waxy white body: [230, 240, 245]
             body_color = (
-                random.randint(220, 245),
-                random.randint(235, 250),
-                random.randint(240, 255)
+                self._py_rng.randint(220, 245),
+                self._py_rng.randint(235, 250),
+                self._py_rng.randint(240, 255)
             )
             cv2.ellipse(canvas, center, axes, angle, 0, 360, body_color, -1)
 
             # Draw perimeter filaments (characteristic lateral wax tassels)
             for _ in range(6):
-                filament_len = random.randint(3, 7)
-                fx = int(px + (w_px // 2 + filament_len) * math.cos(math.radians(random.uniform(0, 360))))
-                fy = int(py + (h_px // 2 + filament_len) * math.sin(math.radians(random.uniform(0, 360))))
+                filament_len = self._py_rng.randint(3, 7)
+                fx = int(px + (w_px // 2 + filament_len) * math.cos(math.radians(self._py_rng.uniform(0, 360))))
+                fy = int(py + (h_px // 2 + filament_len) * math.sin(math.radians(self._py_rng.uniform(0, 360))))
                 cv2.line(canvas, (px, py), (fx, fy), (240, 250, 255), 1)
 
             # Compute exact tight bounding box of rotated ellipse with margin for wax filaments
@@ -227,3 +234,4 @@ class SyntheticVinePestGenerator:
         )
 
         return canvas, sample
+

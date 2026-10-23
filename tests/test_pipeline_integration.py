@@ -107,3 +107,134 @@ def test_yolo_detector_predict_none_or_empty_returns_empty():
     assert yolo_det.predict(np.zeros((0, 0, 3), dtype=np.uint8)) == []
     assert yolo_det.predict_batch([]) == []
     assert yolo_det.predict_batch([None, np.zeros((0, 0, 3), dtype=np.uint8)]) == [[], []]
+
+
+def test_onnx_detector_preprocess_handles_grayscale_and_rgba(tmp_path: Path):
+    onnx_file = tmp_path / "test_mini_prep.onnx"
+    ModelExporter.generate_minimal_onnx_fixture(onnx_file, num_classes=3)
+    detector = ONNXDetector(onnx_file)
+
+    # 2D grayscale
+    gray_img = np.ones((480, 640), dtype=np.uint8) * 128
+    tensor_gray, scale, pad = detector._preprocess(gray_img)
+    assert tensor_gray.shape == (1, 3, 640, 640)
+
+    # 4-channel RGBA
+    rgba_img = np.ones((480, 640, 4), dtype=np.uint8) * 200
+    tensor_rgba, scale, pad = detector._preprocess(rgba_img)
+    assert tensor_rgba.shape == (1, 3, 640, 640)
+
+
+def test_onnx_detector_static_batch_fallback(tmp_path: Path):
+    # Test that when has_dynamic_batch is False, predict_batch runs sequentially without crashing
+    onnx_file = tmp_path / "test_static.onnx"
+    ModelExporter.generate_minimal_onnx_fixture(onnx_file, num_classes=3)
+    detector = ONNXDetector(onnx_file)
+    # Simulate static batch model
+    detector.has_dynamic_batch = False
+
+    images = [
+        np.zeros((640, 640, 3), dtype=np.uint8),
+        np.ones((640, 640, 3), dtype=np.uint8) * 50,
+        np.ones((640, 640, 3), dtype=np.uint8) * 100,
+    ]
+    results = detector.predict_batch(images, conf_threshold=0.1)
+    assert len(results) == 3
+    for r in results:
+        assert isinstance(r, list)
+
+
+def test_model_exporter_quantize_onnx_dynamic(tmp_path: Path):
+    onnx_file = tmp_path / "base.onnx"
+    quant_file = tmp_path / "quantized.onnx"
+    ModelExporter.generate_minimal_onnx_fixture(onnx_file, num_classes=3)
+    out = ModelExporter.quantize_onnx_dynamic(onnx_file, quant_file)
+    assert Path(out).exists()
+    assert quant_file.exists()
+
+
+def test_pest_visualizer_create_side_by_side_proxy():
+    from src.utils.visualizer import PestVisualizer
+    from src.domain.entities import BoundingBox, Detection
+
+    large_img = np.zeros((1440, 2560, 3), dtype=np.uint8)
+    dets1 = [Detection(BoundingBox(100, 100, 200, 200), 0, "nymph", 0.9)]
+    dets2 = [Detection(BoundingBox(300, 300, 450, 450), 1, "adult", 0.85)]
+
+    banner = PestVisualizer.create_side_by_side_proxy(large_img, dets1, dets2, target_display_width=1200)
+    assert banner is not None
+    # Each panel was scaled down to 600w, total 1200w
+    assert banner.shape[1] == 1200
+    assert banner.shape[0] > 0
+
+    # Test create_side_by_side_comparison calls proxy
+    comp = PestVisualizer.create_side_by_side_comparison(large_img, dets1, dets2, target_display_width=1200)
+    assert comp.shape == banner.shape
+
+
+def test_pest_visualizer_empty_and_invalid_inputs():
+    from src.utils.visualizer import PestVisualizer
+
+    empty_img = np.zeros((0, 0, 3), dtype=np.uint8)
+    banner_empty = PestVisualizer.create_side_by_side_proxy(empty_img, [], [])
+    assert banner_empty.size == 0
+
+    banner_none = PestVisualizer.create_side_by_side_proxy(None, [], [])
+    assert banner_none.size == 0
+
+    drawn_none = PestVisualizer.draw_detections(None, [])
+    assert drawn_none.size == 0
+
+    grid_none = PestVisualizer.draw_tiling_grid(None, [])
+    assert grid_none.size == 0
+
+    valid_img = np.zeros((100, 100, 3), dtype=np.uint8)
+    with pytest.raises(ValueError, match="target_display_width must be positive"):
+        PestVisualizer.create_side_by_side_proxy(valid_img, [], [], target_display_width=0)
+
+
+def test_onnx_detector_preprocess_empty_raises_value_error(tmp_path: Path):
+    onnx_file = tmp_path / "test_mini_prep_err.onnx"
+    ModelExporter.generate_minimal_onnx_fixture(onnx_file, num_classes=3)
+    detector = ONNXDetector(onnx_file)
+
+    with pytest.raises(ValueError, match="Input image cannot be None or empty"):
+        detector._preprocess(np.zeros((0, 0, 3), dtype=np.uint8))
+    with pytest.raises(ValueError, match="Input image cannot be None or empty"):
+        detector._preprocess(None)
+
+
+def test_model_exporter_quantize_onnx_missing_file_raises_filenotfound(tmp_path: Path):
+    missing_onnx = tmp_path / "ghost.onnx"
+    out_quant = tmp_path / "out.onnx"
+    with pytest.raises(FileNotFoundError, match="Input ONNX model not found"):
+        ModelExporter.quantize_onnx_dynamic(missing_onnx, out_quant)
+
+
+def test_streamlit_app_caching_and_sample_switching():
+    from streamlit.testing.v1 import AppTest
+
+    app_path = Path(__file__).resolve().parent.parent / "app.py"
+    at = AppTest.from_file(str(app_path))
+    at.run(timeout=30)
+    assert len(at.exception) == 0
+    assert "inference_cache" in at.session_state
+
+    initial_plant_id = at.session_state["inference_cache"]["plant_id"]
+
+    # Select another sample
+    found_sb = False
+    for sb in at.sidebar.selectbox:
+        if "Caso de Estudo" in sb.label:
+            # Pick a different key
+            other_key = "T3" if initial_plant_id != "PLANTA_T3" else "T1"
+            sb.select(other_key)
+            found_sb = True
+            break
+    assert found_sb
+
+    at.run(timeout=30)
+    assert len(at.exception) == 0
+    updated_plant_id = at.session_state["inference_cache"]["plant_id"]
+    assert updated_plant_id != initial_plant_id
+

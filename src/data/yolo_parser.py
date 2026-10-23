@@ -49,8 +49,10 @@ class YOLOParser:
         Loads YOLO annotation txt file and returns list of Detection objects.
         """
         p = Path(txt_path)
+        if not p.exists():
+            raise FileNotFoundError(f"YOLO annotation file not found: {txt_path}")
         if not p.is_file():
-            return []
+            raise FileNotFoundError(f"YOLO annotation path is not a file: {txt_path}")
 
         if img_width <= 0 or img_height <= 0:
             raise ValueError(f"Image dimensions must be positive integers, got: {img_width}x{img_height}")
