@@ -6,7 +6,13 @@ import pytest
 import numpy as np
 
 from src.domain.entities import BoundingBox, Detection
-from src.core.nms import nms_numpy, soft_nms_numpy, weighted_boxes_fusion, apply_nms
+from src.core.nms import (
+    nms_numpy,
+    soft_nms_numpy,
+    weighted_boxes_fusion,
+    border_aware_box_fusion,
+    apply_nms
+)
 
 
 def test_nms_suppression():
@@ -126,3 +132,68 @@ def test_nms_empty_or_single():
     assert apply_nms([]) == []
     b = Detection(BoundingBox(0, 0, 10, 10), class_id=0, class_name="nymph", confidence=0.8)
     assert len(apply_nms([b])) == 1
+
+
+def test_border_aware_box_fusion_empty_and_single():
+    assert border_aware_box_fusion([]) == []
+    b1 = Detection(BoundingBox(10, 10, 50, 50), class_id=0, class_name="nymph", confidence=0.9)
+    assert len(border_aware_box_fusion([b1])) == 1
+
+
+def test_border_aware_box_fusion_invalid_params_raises():
+    b1 = Detection(BoundingBox(10, 10, 50, 50), class_id=0, class_name="nymph", confidence=0.9)
+    with pytest.raises(ValueError, match="iou_threshold must be in"):
+        border_aware_box_fusion([b1], iou_threshold=-0.1)
+    with pytest.raises(ValueError, match="containment_threshold must be in"):
+        border_aware_box_fusion([b1], containment_threshold=1.5)
+
+
+def test_border_aware_box_fusion_edge_truncation_preserves_outer_extent():
+    truncated_det = Detection(BoundingBox(620, 100, 640, 130), class_id=0, class_name="nymph", confidence=0.85)
+    full_det = Detection(BoundingBox(620, 100, 655, 130), class_id=0, class_name="nymph", confidence=0.90)
+
+    fused = border_aware_box_fusion([truncated_det, full_det], iou_threshold=0.55, containment_threshold=0.70)
+    assert len(fused) == 1
+    assert fused[0].bbox.xmax == 655.0
+    assert fused[0].bbox.xmin == 620.0
+    assert fused[0].confidence == pytest.approx(0.90)
+
+
+def test_border_aware_box_fusion_dense_colony_preserves_distinct_pests():
+    p1 = Detection(BoundingBox(100, 100, 125, 125), class_id=0, class_name="nymph", confidence=0.92)
+    p2 = Detection(BoundingBox(120, 100, 145, 125), class_id=0, class_name="nymph", confidence=0.88)
+
+    fused = border_aware_box_fusion([p1, p2], iou_threshold=0.55, containment_threshold=0.70)
+    assert len(fused) == 2
+
+
+def test_border_aware_box_fusion_class_aware():
+    p1 = Detection(BoundingBox(100, 100, 150, 150), class_id=0, class_name="nymph", confidence=0.92)
+    p2 = Detection(BoundingBox(105, 105, 145, 145), class_id=1, class_name="adult", confidence=0.88)
+
+    fused = border_aware_box_fusion([p1, p2])
+    assert len(fused) == 2
+
+
+def test_border_aware_box_fusion_area_ratio_threshold_validation():
+    b1 = Detection(BoundingBox(10, 10, 50, 50), class_id=0, class_name="nymph", confidence=0.9)
+    with pytest.raises(ValueError, match="area_ratio_threshold must be in"):
+        border_aware_box_fusion([b1], area_ratio_threshold=-0.1)
+    with pytest.raises(ValueError, match="area_ratio_threshold must be in"):
+        border_aware_box_fusion([b1], area_ratio_threshold=1.5)
+
+
+def test_border_aware_box_fusion_multi_fragment_connected_components():
+    # Multi-tile seam: 2 truncated fragments and 1 full box of the same pest
+    d1 = Detection(BoundingBox(100, 100, 120, 140), class_id=0, class_name="nymph", confidence=0.85)
+    d2 = Detection(BoundingBox(110, 100, 130, 140), class_id=0, class_name="nymph", confidence=0.90)
+    d3 = Detection(BoundingBox(100, 100, 135, 140), class_id=0, class_name="nymph", confidence=0.75)
+
+    fused = border_aware_box_fusion([d1, d2, d3])
+    assert len(fused) == 1
+    assert fused[0].bbox.xmin == 100.0
+    assert fused[0].bbox.xmax == 135.0
+    assert fused[0].bbox.ymin == 100.0
+    assert fused[0].bbox.ymax == 140.0
+    assert fused[0].confidence == pytest.approx(0.90)
+
