@@ -10,7 +10,9 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+import io
 import numpy as np
+import pandas as pd
 import cv2
 import streamlit as st
 from PIL import Image
@@ -199,13 +201,127 @@ def main():
     sahi_pipeline = HyperInferencePipeline(detector=detector, slicer=slicer, global_nms_iou=nms_iou, use_box_fusion=True)
     resize_pipeline = StandardResizePipeline(detector=detector)
 
-    # Run inference
-    with st.spinner("Executando inferência e fusão espacial..."):
-        sahi_result = sahi_pipeline.run(img_bgr, conf_threshold=conf_thresh, evaluate_full_image=evaluate_macro)
-        resize_result = resize_pipeline.run(img_bgr, conf_threshold=conf_thresh)
+    # Encapsulate inference in session_state so slider adjustments don't trigger expensive re-inference on 50MP images
+    cache_key = f"{plant_id}_{slice_size}_{overlap_ratio}_{conf_thresh}_{nms_iou}_{evaluate_macro}_{use_yolo}"
+    image_changed = st.session_state.get("current_plant_id") != plant_id
+    needs_recompute = ("inference_cache" not in st.session_state) or run_btn or image_changed
+
+    if needs_recompute:
+        with st.spinner("Executando inferência e fusão espacial..."):
+            sahi_result = sahi_pipeline.run(img_bgr, conf_threshold=conf_thresh, evaluate_full_image=evaluate_macro)
+            resize_result = resize_pipeline.run(img_bgr, conf_threshold=conf_thresh)
+            st.session_state["cache_key"] = cache_key
+            st.session_state["current_plant_id"] = plant_id
+            st.session_state["inference_cache"] = {
+                "sahi_result": sahi_result,
+                "resize_result": resize_result,
+                "img_bgr": img_bgr,
+                "plant_id": plant_id,
+                "spad_val": spad_val,
+                "slice_size": slice_size,
+                "overlap_ratio": overlap_ratio,
+            }
+    elif st.session_state.get("cache_key") != cache_key:
+        st.sidebar.warning("⚠️ Parâmetros alterados! Clique em **'🚀 Processar Imagem com SAHI & YOLO'** para recalcular.")
+
+    cached = st.session_state["inference_cache"]
+    sahi_result = cached["sahi_result"]
+    resize_result = cached["resize_result"]
+    display_img = cached["img_bgr"]
+    plant_id = cached["plant_id"]
+    spad_val = cached["spad_val"]
+    h, w = display_img.shape[:2]
+
+    # Native 1:1 optical zoom crop inspector in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔬 Inspetor de Zoom Óptico 1:1")
+    zoom_active = st.sidebar.checkbox("Ativar Lupa Óptica 1:1", value=True)
+    if zoom_active:
+        zoom_window_size = st.sidebar.select_slider(
+            "Tamanho da Janela de Zoom (px):",
+            options=[256, 384, 512, 640],
+            value=384,
+            key="zoom_win_size"
+        )
+        crop_cx = st.sidebar.slider("Centro X da Lupa:", 0, w, w // 2, step=10, key="zoom_cx")
+        crop_cy = st.sidebar.slider("Centro Y da Lupa:", 0, h, h // 2, step=10, key="zoom_cy")
+
+        half_w = zoom_window_size // 2
+        c_x1 = max(0, crop_cx - half_w)
+        c_y1 = max(0, crop_cy - half_w)
+        c_x2 = min(w, c_x1 + zoom_window_size)
+        c_y2 = min(h, c_y1 + zoom_window_size)
+        c_x1 = max(0, c_x2 - zoom_window_size)
+        c_y1 = max(0, c_y2 - zoom_window_size)
+
+        native_crop = display_img[c_y1:c_y2, c_x1:c_x2].copy()
+        crop_bbox = BoundingBox(float(c_x1), float(c_y1), float(c_x2), float(c_y2))
+
+        crop_dets: List[Detection] = []
+        for det in sahi_result.detections:
+            if det.bbox.intersects(crop_bbox):
+                local_bbox = BoundingBox(
+                    xmin=max(0.0, det.bbox.xmin - c_x1),
+                    ymin=max(0.0, det.bbox.ymin - c_y1),
+                    xmax=min(float(c_x2 - c_x1), det.bbox.xmax - c_x1),
+                    ymax=min(float(c_y2 - c_y1), det.bbox.ymax - c_y1)
+                )
+                crop_dets.append(
+                    Detection(
+                        bbox=local_bbox,
+                        class_id=det.class_id,
+                        class_name=det.class_name,
+                        confidence=det.confidence
+                    )
+                )
+
+        crop_annotated = PestVisualizer.draw_detections(native_crop, crop_dets, line_thickness=2)
+        st.sidebar.image(
+            cv2.cvtColor(crop_annotated, cv2.COLOR_BGR2RGB),
+            caption=f"Crop Óptico 1:1 ({c_x2 - c_x1}x{c_y2 - c_y1}px) | Pragas na Lupa: {len(crop_dets)}",
+            use_container_width=True
+        )
 
     # Fitosanitary Diagnosis
     diagnosis = AgronomicPestAnalyzer.evaluate_sample_severity(len(sahi_result.detections), spad_val)
+
+    # Phytosanitary CSV Report Generation
+    report_columns = [
+        "detection_id", "plant_id", "class_id", "class_name", "confidence",
+        "xmin", "ymin", "xmax", "ymax", "width", "height", "area_px2",
+        "spad_502_index", "severity_level", "action_required"
+    ]
+    csv_rows = []
+    for idx, d in enumerate(sahi_result.detections, 1):
+        csv_rows.append({
+            "detection_id": idx,
+            "plant_id": plant_id,
+            "class_id": d.class_id,
+            "class_name": d.class_name,
+            "confidence": round(d.confidence, 4),
+            "xmin": round(d.bbox.xmin, 2),
+            "ymin": round(d.bbox.ymin, 2),
+            "xmax": round(d.bbox.xmax, 2),
+            "ymax": round(d.bbox.ymax, 2),
+            "width": round(d.bbox.width, 2),
+            "height": round(d.bbox.height, 2),
+            "area_px2": round(d.bbox.area, 2),
+            "spad_502_index": spad_val,
+            "severity_level": diagnosis.level,
+            "action_required": diagnosis.action_required,
+        })
+    df_report = pd.DataFrame(csv_rows, columns=report_columns)
+    csv_bytes = df_report.to_csv(index=False).encode("utf-8")
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📄 Relatório Fitossanitário")
+    st.sidebar.download_button(
+        label="📥 Exportar Relatório CSV",
+        data=csv_bytes,
+        file_name=f"relatorio_fitossanitario_{plant_id}.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
 
     # ---------------------------------------------------------
     # Top KPI Cards
@@ -273,15 +389,15 @@ def main():
 
     if view_mode == "Lado a Lado (Comparativo Direto)":
         comp_banner = PestVisualizer.create_side_by_side_comparison(
-            img_bgr, resize_result.detections, sahi_result.detections, target_display_width=1600
+            display_img, resize_result.detections, sahi_result.detections, target_display_width=1600
         )
         st.image(cv2.cvtColor(comp_banner, cv2.COLOR_BGR2RGB), use_container_width=True)
     elif view_mode == "Apenas SAHI (Alta Resolução)":
-        annotated = PestVisualizer.draw_detections(img_bgr, sahi_result.detections)
+        annotated = PestVisualizer.draw_detections(display_img, sahi_result.detections)
         st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), use_container_width=True, caption=f"Total: {len(sahi_result.detections)} pragas detectadas com coordenadas globais.")
     else:
-        windows = slicer.generate_windows(img_bgr.shape)
-        grid_vis = PestVisualizer.draw_tiling_grid(img_bgr, windows)
+        windows = slicer.generate_windows(display_img.shape)
+        grid_vis = PestVisualizer.draw_tiling_grid(display_img, windows)
         grid_annotated = PestVisualizer.draw_detections(grid_vis, sahi_result.detections)
         st.image(cv2.cvtColor(grid_annotated, cv2.COLOR_BGR2RGB), use_container_width=True, caption=f"Canvas fatiado em {len(windows)} janelas com sobreposição de {int(overlap_ratio*100)}%.")
 
@@ -304,6 +420,16 @@ def main():
         c2.metric("Adultos (3-4 mm)", adults)
         c3.metric("Massas de Ovos / Colônias", ovisacs)
 
+        st.markdown("---")
+        st.download_button(
+            label=f"📥 Baixar Relatório Fitossanitário Completo (CSV - {len(sahi_result.detections)} pragas)",
+            data=csv_bytes,
+            file_name=f"relatorio_fitossanitario_{plant_id}.csv",
+            mime="text/csv",
+            key="tab_agro_csv_dl",
+            use_container_width=True
+        )
+
     with tab_tech:
         st.write({
             "Dimensões da Imagem Original": f"{w} x {h} pixels",
@@ -312,12 +438,12 @@ def main():
             "FPS Equivalente": f"{sahi_result.fps:.1f}",
             "Candidatos Pré-NMS": sahi_result.raw_tile_detection_count,
             "Detecções Consolidadas Pós-NMS": len(sahi_result.detections),
-            "Filtro de Supressão": "Weighted Boxes Fusion (WBF) com média ponderada"
+            "Filtro de Supressão": "Border-Aware Box Fusion (BABF) com proteção de bordas"
         })
 
     with tab_memory:
         mem_stats = MemoryProfiler.compute_memory_savings(
-            image_shape=img_bgr.shape,
+            image_shape=display_img.shape,
             num_tiles=sahi_result.num_tiles_processed,
             tile_shape=(slice_size, slice_size, 3)
         )
