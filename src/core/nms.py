@@ -236,6 +236,174 @@ def weighted_boxes_fusion(
     return sorted(final_detections, key=lambda d: d.confidence, reverse=True)
 
 
+def border_aware_box_fusion(
+    detections: List[Detection],
+    iou_threshold: float = 0.55,
+    containment_threshold: float = 0.70,
+    area_ratio_threshold: float = 0.80
+) -> List[Detection]:
+    """
+    Border-Aware Box Fusion (BABF) across overlapping tiles in SAHI.
+    
+    Solves two critical failure modes in high-resolution agricultural pest detection:
+    1. Edge-Truncated Duplications & Distortions:
+       When a pest is sliced by a tile boundary, a partial/truncated detection
+       is produced. Standard WBF either drops the match (IoU < threshold) leading to
+       duplicate partials, or naively averages coordinates, which pulls the boundary
+       inward and shrinks the insect box.
+       BABF detects containment (intersection / min_area >= containment_threshold)
+       and guards the outer physical boundaries (min xmin/ymin, max xmax/ymax).
+       
+    2. Dense Colony Preservation:
+       In dense insect clusters (e.g., Planococcus citri colonies), adjacent distinct
+       nymphs/adults with low overlap (IoU < iou_threshold and containment < threshold)
+       are strictly preserved as distinct entities without collapsing into a single box.
+       
+    Args:
+        detections: List of candidate Detection entities.
+        iou_threshold: Intersection-over-Union threshold for similar-sized boxes (0.0 to 1.0).
+        containment_threshold: Intersection-over-Area (IoA) threshold on the smaller box
+                               to identify edge-truncated duplicates (0.0 to 1.0).
+        area_ratio_threshold: Ratio between min and max area below which the smaller detection
+                              is treated as edge-truncated rather than an unclipped duplicate.
+                              
+    Returns:
+        Consolidated List of Detection entities, sorted descending by confidence.
+    """
+    if not (0.0 <= iou_threshold <= 1.0):
+        raise ValueError(f"iou_threshold must be in [0.0, 1.0], got: {iou_threshold}")
+    if not (0.0 <= containment_threshold <= 1.0):
+        raise ValueError(f"containment_threshold must be in [0.0, 1.0], got: {containment_threshold}")
+    if not (0.0 <= area_ratio_threshold <= 1.0):
+        raise ValueError(f"area_ratio_threshold must be in [0.0, 1.0], got: {area_ratio_threshold}")
+
+    if len(detections) <= 1:
+        return list(detections)
+
+    def _boxes_match(d1: Detection, d2: Detection) -> bool:
+        iou = d1.bbox.iou(d2.bbox)
+        if iou >= iou_threshold:
+            return True
+        inter = d1.bbox.intersection(d2.bbox)
+        min_area = min(d1.bbox.area, d2.bbox.area)
+        if min_area > 0:
+            ioa = inter / min_area
+            if ioa >= containment_threshold:
+                larger_bbox = d2.bbox if d2.bbox.area >= d1.bbox.area else d1.bbox
+                smaller_bbox = d1.bbox if d2.bbox.area >= d1.bbox.area else d2.bbox
+                cx, cy = smaller_bbox.center
+                if (larger_bbox.xmin <= cx <= larger_bbox.xmax and
+                    larger_bbox.ymin <= cy <= larger_bbox.ymax):
+                    return True
+        return False
+
+    classes = set(d.class_id for d in detections)
+    final_detections: List[Detection] = []
+
+    for cid in classes:
+        c_dets = [d for d in detections if d.class_id == cid]
+        c_dets.sort(key=lambda d: d.confidence, reverse=True)
+
+        clusters: List[List[Detection]] = []
+
+        for d in c_dets:
+            matched_indices = [
+                idx for idx, cl in enumerate(clusters)
+                if any(_boxes_match(d, rep) for rep in cl)
+            ]
+
+            if not matched_indices:
+                clusters.append([d])
+            elif len(matched_indices) == 1:
+                clusters[matched_indices[0]].append(d)
+            else:
+                primary = clusters[matched_indices[0]]
+                primary.append(d)
+                for idx in sorted(matched_indices[1:], reverse=True):
+                    primary.extend(clusters[idx])
+                    del clusters[idx]
+
+        # Fuse each cluster
+        fused_class_dets: List[Detection] = []
+        for cluster in clusters:
+            if len(cluster) == 1:
+                fused_class_dets.append(cluster[0])
+                continue
+
+            max_area = max(item.bbox.area for item in cluster)
+            has_truncated_box = any(
+                (item.bbox.area / max_area < area_ratio_threshold)
+                for item in cluster
+                if max_area > 0
+            )
+
+            weights = np.array([item.confidence for item in cluster], dtype=np.float64)
+            w_sum = max(float(np.sum(weights)), 1e-8)
+
+            if has_truncated_box:
+                # Border-guard: protect outer boundary from being shrunken by truncated slice
+                fused_xmin = float(min(item.bbox.xmin for item in cluster))
+                fused_ymin = float(min(item.bbox.ymin for item in cluster))
+                fused_xmax = float(max(item.bbox.xmax for item in cluster))
+                fused_ymax = float(max(item.bbox.ymax for item in cluster))
+            else:
+                # Sub-pixel weighted average for unclipped, similar-sized boxes
+                xmins = np.array([item.bbox.xmin for item in cluster], dtype=np.float64)
+                ymins = np.array([item.bbox.ymin for item in cluster], dtype=np.float64)
+                xmaxs = np.array([item.bbox.xmax for item in cluster], dtype=np.float64)
+                ymaxs = np.array([item.bbox.ymax for item in cluster], dtype=np.float64)
+
+                fused_xmin = float(np.sum(xmins * weights) / w_sum)
+                fused_ymin = float(np.sum(ymins * weights) / w_sum)
+                fused_xmax = float(np.sum(xmaxs * weights) / w_sum)
+                fused_ymax = float(np.sum(ymaxs * weights) / w_sum)
+
+            fused_conf = float(max(d.confidence for d in cluster))
+
+            fused_box = BoundingBox(
+                xmin=fused_xmin,
+                ymin=fused_ymin,
+                xmax=max(fused_xmin, fused_xmax),
+                ymax=max(fused_ymin, fused_ymax)
+            )
+
+            fused_class_dets.append(
+                Detection(
+                    bbox=fused_box,
+                    class_id=cluster[0].class_id,
+                    class_name=cluster[0].class_name,
+                    confidence=fused_conf
+                )
+            )
+
+        # Post-fusion check: ensure no residual contained boxes remain across clusters
+        fused_class_dets.sort(key=lambda d: d.confidence, reverse=True)
+        consolidated: List[Detection] = []
+        for fd in fused_class_dets:
+            merged = False
+            for c_idx, cd in enumerate(consolidated):
+                if _boxes_match(fd, cd):
+                    f_xmin = min(fd.bbox.xmin, cd.bbox.xmin)
+                    f_ymin = min(fd.bbox.ymin, cd.bbox.ymin)
+                    f_xmax = max(fd.bbox.xmax, cd.bbox.xmax)
+                    f_ymax = max(fd.bbox.ymax, cd.bbox.ymax)
+                    f_conf = max(fd.confidence, cd.confidence)
+                    consolidated[c_idx] = Detection(
+                        bbox=BoundingBox(f_xmin, f_ymin, f_xmax, f_ymax),
+                        class_id=cd.class_id,
+                        class_name=cd.class_name,
+                        confidence=f_conf
+                    )
+                    merged = True
+                    break
+            if not merged:
+                consolidated.append(fd)
+
+        final_detections.extend(consolidated)
+
+    return sorted(final_detections, key=lambda d: d.confidence, reverse=True)
+
+
 def apply_nms(
     detections: List[Detection],
     iou_threshold: float = 0.5,

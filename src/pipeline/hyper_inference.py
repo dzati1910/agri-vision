@@ -8,13 +8,13 @@ and multi-tile NMS fusion to solve the small-object vanishing problem.
 from __future__ import annotations
 import time
 from dataclasses import dataclass
-from typing import List, Tuple, Sequence, Optional
+from typing import List, Tuple, Sequence, Optional, Union
 import numpy as np
 import cv2
 
 from src.core.interfaces import BaseDetector, BaseSlicer
 from src.slicing.sahi_slicer import SAHISlicer
-from src.core.nms import apply_nms, weighted_boxes_fusion
+from src.core.nms import apply_nms, weighted_boxes_fusion, border_aware_box_fusion
 from src.domain.entities import BoundingBox, Detection
 
 
@@ -39,7 +39,7 @@ class HyperInferencePipeline:
         detector: BaseDetector,
         slicer: Optional[BaseSlicer] = None,
         global_nms_iou: float = 0.50,
-        use_box_fusion: bool = True,
+        use_box_fusion: Union[bool, str] = True,
         batch_size: int = 4
     ) -> None:
         self.detector = detector
@@ -99,9 +99,11 @@ class HyperInferencePipeline:
             full_img_dets = self.detector.predict(image, conf_threshold=conf_threshold)
             raw_detections.extend(full_img_dets)
 
-        # 3. Post-process with Global NMS or Weighted Box Fusion across tile boundaries
-        if self.use_box_fusion:
+        # 3. Post-process with Global NMS, Weighted Box Fusion, or Border-Aware Box Fusion across tile boundaries
+        if self.use_box_fusion == "wbf":
             fused_detections = weighted_boxes_fusion(raw_detections, iou_threshold=self.global_nms_iou)
+        elif self.use_box_fusion in (True, "border_aware", "babf"):
+            fused_detections = border_aware_box_fusion(raw_detections, iou_threshold=self.global_nms_iou)
         else:
             fused_detections = apply_nms(raw_detections, iou_threshold=self.global_nms_iou)
 

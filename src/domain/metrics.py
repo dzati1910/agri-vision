@@ -87,8 +87,8 @@ def compute_ap(recalls: np.ndarray, precisions: np.ndarray) -> float:
     mpre = np.concatenate(([0.0], precisions, [0.0]))
 
     # Compute the precision envelope (ensure monotonically decreasing from right to left)
-    for i in range(len(mpre) - 2, -1, -1):
-        mpre[i] = max(mpre[i], mpre[i + 1])
+    # Vectorized: accumulate maximum from right in a single C-level pass
+    mpre = np.maximum.accumulate(mpre[::-1])[::-1]
 
     # Find points where recall changes
     indices = np.where(mrec[1:] != mrec[:-1])[0]
@@ -179,15 +179,14 @@ def evaluate_detections(
 
                 for p_idx, p in enumerate(c_preds):
                     scores.append(p.confidence)
-                    # Find highest IoU with unmatched ground truth
-                    best_iou = 0.0
-                    best_gt_idx = -1
-                    for g_idx in range(len(c_gts)):
-                        if g_idx not in matched_gt and iou_mat[p_idx, g_idx] > best_iou:
-                            best_iou = float(iou_mat[p_idx, g_idx])
-                            best_gt_idx = g_idx
+                    # Mask already-matched GTs and find best remaining match via vectorized argmax
+                    row = iou_mat[p_idx].copy()
+                    if matched_gt:
+                        row[list(matched_gt)] = 0.0
+                    best_gt_idx = int(np.argmax(row))
+                    best_iou = float(row[best_gt_idx])
 
-                    if best_iou >= thresh and best_gt_idx >= 0:
+                    if best_iou >= thresh and best_iou > 0.0:
                         is_tp_list.append(1)
                         matched_gt.add(best_gt_idx)
                     else:
