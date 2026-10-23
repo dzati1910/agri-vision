@@ -21,8 +21,8 @@ ENV/
 *.onnx.data
 *.cache
 runs/
-output/
-data/
+/output/
+/data/
 
 # OS and IDE files
 .DS_Store
