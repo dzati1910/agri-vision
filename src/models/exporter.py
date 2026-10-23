@@ -6,7 +6,7 @@ reproducible ONNX test graphs for edge validation.
 """
 
 from __future__ import annotations
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Any
 from pathlib import Path
 import torch
 import torch.nn as nn
@@ -29,17 +29,13 @@ class MiniPestYOLOHead(nn.Module):
             nn.SiLU(),
             nn.AdaptiveAvgPool2d((20, 20))
         )
-        # Linear projection to generate candidate anchor boxes
-        self.head = nn.Linear(16 * 20 * 20, (4 + num_classes) * 84)
+        # 1x1 Conv projection to generate candidate anchor boxes (YOLO architecture)
+        self.head = nn.Conv2d(16, 4 + num_classes, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b = x.shape[0]
         feats = self.backbone(x)
-        flat = feats.view(b, -1)
-        out = self.head(flat)
-        out = out.view(b, 4 + self.num_classes, 84)
-        # Repeat to simulate standard 8400 grid points
-        repeats = self.num_anchors // 84
+        out = self.head(feats).flatten(2)
+        repeats = self.num_anchors // out.shape[2]
         out = out.repeat(1, 1, repeats)
         cx_cy = torch.sigmoid(out[:, :2, :]) * 640.0
         w_h = torch.abs(out[:, 2:4, :]) + 15.0
@@ -56,20 +52,58 @@ class ModelExporter:
         model_pt_path: str | Path,
         output_onnx_path: str | Path,
         imgsz: Tuple[int, int] = (640, 640),
-        opset: int = 17
+        opset: int = 17,
+        dynamic: bool = True
     ) -> str:
         """
-        Exports Ultralytics model to ONNX.
+        Exports Ultralytics model to ONNX with dynamic batch support.
         """
+        import shutil
         from ultralytics import YOLO
+
         model = YOLO(str(model_pt_path))
         exported_path = model.export(
             format="onnx",
             imgsz=list(imgsz),
             opset=opset,
-            dynamic=False
+            dynamic=dynamic
         )
+
+        out_path = Path(output_onnx_path).resolve()
+        exp_path = Path(exported_path).resolve()
+        if out_path != exp_path:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(exported_path, str(out_path))
+            return str(out_path)
+
         return str(exported_path)
+
+    @staticmethod
+    def quantize_onnx_dynamic(
+        input_onnx_path: str | Path,
+        output_onnx_path: str | Path,
+        weight_type: Optional[Any] = None
+    ) -> str:
+        """
+        Applies dynamic INT8 quantization to an ONNX model, reducing model size
+        and accelerating inference on CPU targets using onnxruntime.quantization.
+        """
+        from onnxruntime.quantization import quantize_dynamic, QuantType
+
+        in_p = Path(input_onnx_path)
+        if not in_p.is_file():
+            raise FileNotFoundError(f"Input ONNX model not found: {input_onnx_path}")
+
+        out_p = Path(output_onnx_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+
+        w_type = weight_type if weight_type is not None else QuantType.QUInt8
+        quantize_dynamic(
+            model_input=str(in_p),
+            model_output=str(out_p),
+            weight_type=w_type
+        )
+        return str(out_p)
 
     @staticmethod
     def generate_minimal_onnx_fixture(
@@ -89,6 +123,9 @@ class ModelExporter:
 
         dummy_input = torch.randn(1, 3, input_size[1], input_size[0], dtype=torch.float32)
 
+        batch_dim = torch.export.Dim("batch_size", min=1, max=256)
+        dynamic_shapes = {"x": {0: batch_dim}}
+
         torch.onnx.export(
             model,
             dummy_input,
@@ -97,7 +134,8 @@ class ModelExporter:
             opset_version=18,
             do_constant_folding=True,
             input_names=["images"],
-            output_names=["output0"]
+            output_names=["output0"],
+            dynamic_shapes=dynamic_shapes,
         )
 
         # Validate ONNX graph
